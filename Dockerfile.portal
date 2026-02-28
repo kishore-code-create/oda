@@ -1,0 +1,48 @@
+# Dockerfile for Oil Spill Portal App
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libpq-dev \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY OilSpillPortal/requirements.txt . 2>/dev/null || echo "No requirements.txt, installing defaults"
+
+# Create requirements if missing
+RUN if [ ! -f requirements.txt ]; then \
+    echo "Flask==2.3.0" > requirements.txt && \
+    echo "Flask-MySQLdb==0.2.0" >> requirements.txt && \
+    echo "pymysql==1.1.0" >> requirements.txt && \
+    echo "google-auth==2.26.0" >> requirements.txt && \
+    echo "google-auth-oauthlib==1.2.0" >> requirements.txt && \
+    echo "google-auth-httplib2==0.2.0" >> requirements.txt && \
+    echo "google-api-python-client==2.107.0" >> requirements.txt && \
+    fi
+
+# Upgrade pip and install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir gunicorn python-dotenv
+
+# Copy application code
+COPY OilSpillPortal /app
+
+# Create non-root user
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:5001/health || exit 1
+
+# Expose port
+EXPOSE 5001
+
+# Run with Gunicorn
+CMD ["gunicorn", "--bind", "0.0.0.0:5001", "--workers", "4", "--worker-class", "sync", "--timeout", "120", "--access-logfile", "-", "--error-logfile", "-", "portal_app:app"]

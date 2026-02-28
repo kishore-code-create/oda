@@ -8,7 +8,8 @@ import os
 # Allow insecure transport for local development (OAuth2 requires HTTPS otherwise)
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
-import pymysql
+import psycopg2
+import psycopg2.extras
 from flask import (Flask, render_template, request, redirect,
                    url_for, session, flash, g)
 from werkzeug.utils import secure_filename
@@ -37,10 +38,10 @@ SCOPES = [
 
 # ── DB config ──────────────────────────────────────────────────────────────────
 DB_HOST     = os.environ.get('DB_HOST', 'localhost')
-DB_USER     = os.environ.get('DB_USER', 'root')
-DB_PASSWORD = os.environ.get('DB_PASSWORD', 'Nandu@2006')
-DB_NAME     = 'oil_spill_portal_db'
-DB_PORT     = 3306
+DB_USER     = os.environ.get('DB_USER', 'postgres')
+DB_PASSWORD = os.environ.get('DB_PASSWORD', 'postgres')
+DB_NAME     = os.environ.get('DB_NAME', 'oil_spill_portal_db')
+DB_PORT     = int(os.environ.get('DB_PORT', 5432))
 
 UPLOAD_FOLDER  = os.path.join(os.path.dirname(__file__), 'static', 'uploads')
 ALLOWED_EXT    = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
@@ -77,12 +78,12 @@ ROLE_VISIBILITY = {
 # ── DB helpers ─────────────────────────────────────────────────────────────────
 def get_db():
     if 'db' not in g:
-        g.db = pymysql.connect(
+        g.db = psycopg2.connect(
             host=DB_HOST, user=DB_USER, password=DB_PASSWORD,
             database=DB_NAME, port=DB_PORT,
-            cursorclass=pymysql.cursors.DictCursor,
-            autocommit=False
+            cursor_factory=psycopg2.extras.DictCursor
         )
+        g.db.autocommit = False
     return g.db
 
 @app.teardown_appcontext
@@ -500,7 +501,7 @@ def create_user():
             db.commit()
             flash(f'User "{uname}" created with role {ROLES[role]}.', 'success')
             return redirect(url_for('admin_users'))
-        except pymysql.err.IntegrityError:
+        except psycopg2.IntegrityError:
             flash(f'Username "{uname}" already exists.', 'danger')
     return render_template('admin/create_user.html', ROLES=ROLES)
 

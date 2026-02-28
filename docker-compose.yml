@@ -1,0 +1,145 @@
+version: '3.9'
+
+services:
+  # MySQL Database
+  mysql:
+    image: mysql:8.0
+    container_name: oil_spill_mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root_password}
+      MYSQL_DATABASE: ${DB_NAME:-oil_spill_db}
+      MYSQL_USER: ${DB_USER:-oil_spill_user}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-secure_password}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./ODA\(OIL\)/oil_spill_detection/oil_spill_detection/database/oil_spill_db.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - oil_spill_network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+    restart: unless-stopped
+
+  # Oil Spill Detection API
+  oil_spill_app:
+    build:
+      context: .
+      dockerfile: Dockerfile.oil_spill
+    container_name: oil_spill_detection
+    environment:
+      FLASK_ENV: ${FLASK_ENV:-production}
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY}
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET}
+      ROBOFLOW_API_KEY: ${ROBOFLOW_API_KEY}
+    ports:
+      - "5000:5000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      - ./ODA\(OIL\)/oil_spill_detection/oil_spill_detection/static:/app/static
+      - ./ODA\(OIL\)/oil_spill_detection/oil_spill_detection:/app
+    networks:
+      - oil_spill_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # Oil Spill Portal App
+  portal_app:
+    build:
+      context: .
+      dockerfile: Dockerfile.portal
+    container_name: oil_spill_portal
+    environment:
+      FLASK_ENV: ${FLASK_ENV:-production}
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY}
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: oil_spill_portal_db
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI}
+    ports:
+      - "5001:5001"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      - ./OilSpillPortal/static:/app/static
+      - ./OilSpillPortal:/app
+    networks:
+      - oil_spill_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # Real Time Detection App
+  realtime_app:
+    build:
+      context: .
+      dockerfile: Dockerfile.realtime
+    container_name: oil_spill_realtime
+    environment:
+      FLASK_ENV: ${FLASK_ENV:-production}
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY}
+    ports:
+      - "5002:5002"
+    volumes:
+      - ./RealTimeDetection/static:/app/static
+      - ./RealTimeDetection:/app
+    networks:
+      - oil_spill_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:latest
+    container_name: oil_spill_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+      - ./ODA\(OIL\)/oil_spill_detection/oil_spill_detection/static:/usr/share/nginx/html/static:ro
+    depends_on:
+      - oil_spill_app
+      - portal_app
+      - realtime_app
+    networks:
+      - oil_spill_network
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+
+networks:
+  oil_spill_network:
+    driver: bridge

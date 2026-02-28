@@ -7,7 +7,8 @@ import datetime
 import time
 import queue
 from flask import Flask, render_template, request, redirect, url_for, session, flash, send_file, g, jsonify, Response, stream_with_context # backed logic
-import pymysql
+import psycopg2
+import psycopg2.extras
 import numpy as np 
 import cv2 #computer vision 
 import matplotlib
@@ -19,7 +20,6 @@ import shutil
 import torch
 import torch.nn as nn #nndl(deep learning)
 import torch.nn.functional as F
-from sklearn.decomposition import PCA
 from tqdm import tqdm
 from PIL import Image
 from roboflow import Roboflow
@@ -27,31 +27,113 @@ from roboflow import Roboflow
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET', 'your_secret_key')
 
+
 # In-memory task store for tracking background processing progress
 # { task_id: { 'progress': int, 'total': int, 'status': str, 'result': dict|None, 'error': str|None, 'queue': Queue } }
 tasks = {}
 
 # Database configuration (use environment variables when available)
 DB_HOST = os.environ.get('DB_HOST', 'localhost')
-DB_USER = os.environ.get('DB_USER', 'root')
-DB_PASSWORD = os.environ.get('DB_PASSWORD', 'Nandu@2006')
+DB_USER = os.environ.get('DB_USER', 'postgres')
+DB_PASSWORD = os.environ.get('DB_PASSWORD', 'postgres')
 DB_NAME = os.environ.get('DB_NAME', 'oil_spill_db')
-DB_PORT = int(os.environ.get('DB_PORT', 3306))
+DB_PORT = int(os.environ.get('DB_PORT', 5432))
 
 # Model path (can be overridden by setting OIL_MODEL_PATH env var)
 MODEL_DEFAULT_PATH = os.path.join(os.path.dirname(__file__), 'file.pth')
 MODEL_PATH = os.environ.get('OIL_MODEL_PATH', MODEL_DEFAULT_PATH)
 
+# ── Model Singleton Cache ─────────────────────────────────────────────────────
+# Load the model ONCE at startup, reuse for ALL requests.
+# Thread-safe: double-checked locking prevents duplicate loads.
+_model_cache = {}
+_model_lock = threading.Lock()
+
+def get_model(input_channels=34, n_classes=2, patch_size=3):
+    """Return a cached (model, device) tuple. Loads from disk only on the very first call."""
+    cache_key = f"{input_channels}_{n_classes}_{patch_size}"
+    if cache_key not in _model_cache:
+        with _model_lock:
+            if cache_key not in _model_cache:  # double-check after acquiring lock
+                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                print(f"[ModelLoader] 🔄 Loading model for the first time on {device}...")
+                model_path = os.environ.get('OIL_MODEL_PATH', MODEL_PATH)
+                if not os.path.exists(model_path):
+                    raise FileNotFoundError(f"Model file not found at {model_path}")
+                model = HamidaEtAl(input_channels, n_classes, patch_size).to(device)
+                state_dict = torch.load(model_path, map_location=device, weights_only=True)
+                model.load_state_dict(state_dict)
+                model.eval()
+                _model_cache[cache_key] = (model, device)
+                print(f"[ModelLoader] ✅ Model cached in {'VRAM' if device.type == 'cuda' else 'RAM'}. Reusing for all future requests.")
+    return _model_cache[cache_key]
+
+def _preload_model():
+    """Warms up model in background at startup so the very first request is instant."""
+    try:
+        get_model()
+    except Exception as e:
+        print(f"[ModelLoader] ⚠️ Preload failed: {e}")
+
+# Preload model in background so first request is instant
+threading.Thread(target=_preload_model, daemon=True).start()
+
+# ── GPU Performance Utilities ────────────────────────────────────────────────
+def gpu_pca(data_tensor, n_components):
+    """
+    Randomized GPU PCA — much faster than full SVD for large matrices.
+    """
+    # 1. Manually center the data (Critical for correct projection)
+    mean = data_tensor.mean(dim=0, keepdim=True)
+    centered = data_tensor - mean
+    
+    # 2. Get the V matrix using randomized SVD
+    U, S, V = torch.pca_lowrank(centered, q=n_components, center=False, niter=4)
+    
+    # 3. Project the centered data
+    reduced = centered @ V
+    return reduced
+
+def get_optimal_batch_size(model, patch_size, input_channels, device, start=8192):
+    """
+    Automatically finds the largest batch size that fits in your VRAM.
+    Starts high and halves until it fits — runs once at startup.
+    """
+    if device.type != 'cuda':
+        return 4096 # CPU fallback
+
+    batch_size = start
+    while batch_size >= 128:
+        try:
+            # Dummy patch batch (B, 1, C, P, P)
+            dummy = torch.zeros(
+                batch_size, 1, input_channels, patch_size, patch_size,
+                device=device
+            )
+            with torch.no_grad(), torch.autocast('cuda'):
+                _ = model(dummy)
+            del dummy
+            torch.cuda.empty_cache()
+            print(f"[BatchTuner] ✅ Optimal batch size for RTX 2050: {batch_size}")
+            return batch_size
+        except torch.cuda.OutOfMemoryError:
+            batch_size //= 2
+            torch.cuda.empty_cache()
+            print(f"[BatchTuner] ⚠️ OOM at {batch_size*2} — trying {batch_size}...")
+
+    return 128  # safe fallback
+
+
 def get_db():
     """Get a database connection for the current request."""
     if 'db' not in g:
-        g.db = pymysql.connect(
+        g.db = psycopg2.connect(
             host=DB_HOST,
             user=DB_USER,
             password=DB_PASSWORD,
             database=DB_NAME,
             port=DB_PORT,
-            cursorclass=pymysql.cursors.DictCursor  # Optional: returns rows as dictionaries
+            cursor_factory=psycopg2.extras.DictCursor
         )
     return g.db
 
@@ -134,37 +216,96 @@ class HamidaEtAl(nn.Module):
         x = self.fc(x)
         return x
 
-def segment_full_image(model, image, patch_size, device, progress_callback=None, batch_size=2048):
+def segment_full_image(model, image, patch_size, device, progress_callback=None, batch_size=4096):
+    """
+    GPU-optimized segmentation using:
+    - Bidirectional CUDA streams (2 streams process top & bottom half simultaneously)
+    - Mixed Precision FP16 (autocast)
+    - Vectorized patch extraction (unfold, no Python loops per pixel)
+    - Non-blocking GPU transfers
+    Falls back to a fast single-stream CPU path when GPU is unavailable.
+    """
     channels, H, W = image.shape
     pad = patch_size // 2
-    padded_image = np.pad(image, ((0, 0), (pad, pad), (pad, pad)), mode='reflect')
-    segmentation = np.zeros((H, W), dtype=np.int64)
+    is_cuda = (device.type == 'cuda')
     
+    # Pad the image
+    if isinstance(image, torch.Tensor):
+        # image is already a GPU tensor (C, H, W)
+        padded = F.pad(image.unsqueeze(0), (pad, pad, pad, pad), mode='reflect')
+        img_t = padded # (1, C, H+2pad, W+2pad)
+    else:
+        # image is a numpy array (C, H, W)
+        padded_np = np.pad(image, ((0, 0), (pad, pad), (pad, pad)), mode='reflect')
+        img_t = torch.from_numpy(padded_np).float().unsqueeze(0).to(device, non_blocking=is_cuda)
+    
+    segmentation = np.zeros((H, W), dtype=np.int64)
+
     model.eval()
-    with torch.no_grad():
-        for i in range(H):
-            row_patches = []
-            for j in range(W):
-                patch = padded_image[:, i:i+patch_size, j:j+patch_size]
-                row_patches.append(patch)
-            
-            row_patches_np = np.stack(row_patches, axis=0)
-            row_preds = []
-            
-            # Process patches in batches to significantly speed up inference
+
+    def _infer_row(i, stream=None):
+        """Extract and infer all patches for row i, optionally inside a CUDA stream."""
+        row_data = img_t[:, :, i:i+patch_size, :]          # (1, C, patch_size, W+2pad)
+        patches = row_data.unfold(3, patch_size, 1)          # (1, C, patch_size, W, patch_size)
+        patches = patches.permute(3, 0, 1, 2, 4).contiguous()  # (W, 1, C, patch_size, patch_size)
+
+        preds_list = []
+        autocast_ctx = torch.autocast(device_type='cuda', enabled=True) if is_cuda else \
+                       torch.autocast(device_type='cpu', enabled=False)
+        with autocast_ctx:
             for b in range(0, W, batch_size):
-                chunk = row_patches_np[b:b+batch_size]
-                chunk_tensor = torch.from_numpy(chunk).float().unsqueeze(1).to(device)
-                output = model(chunk_tensor)
-                preds = torch.argmax(output, dim=1).cpu().numpy()
-                row_preds.append(preds)
-                
-            row_result = np.concatenate(row_preds)
-            segmentation[i, :] = row_result
-            
-            # Call progress callback after each row, passing the row data
-            if progress_callback:
-                progress_callback(i + 1, H, row_result.tolist())
+                out = model(patches[b:b+batch_size])
+                preds_list.append(torch.argmax(out, dim=1))
+
+        row_pred = torch.cat(preds_list)[:W].cpu().numpy()
+        return row_pred
+
+    if is_cuda:
+        # ─── DUAL-STREAM GPU PATH with live progress ─────────────────
+        CHUNK_SIZE = 32  # rows per chunk
+        stream_top = torch.cuda.Stream(device=device)
+        stream_bot = torch.cuda.Stream(device=device)
+
+        with torch.no_grad():
+            for chunk_start in range(0, H // 2 + (H % 2), CHUNK_SIZE):
+                chunk_end = min(chunk_start + CHUNK_SIZE, H // 2 + (H % 2))
+
+                chunk_top = {}
+                chunk_bot = {}
+
+                for i in range(chunk_start, chunk_end):
+                    j = H - 1 - i  # mirror bottom row index
+                    with torch.cuda.stream(stream_top):
+                        chunk_top[i] = _infer_row(i)
+                    if j != i:
+                        with torch.cuda.stream(stream_bot):
+                            chunk_bot[j] = _infer_row(j)
+
+                # Synchronize after each chunk so results are ready
+                torch.cuda.synchronize()
+
+                # Write chunk results
+                for i in range(chunk_start, chunk_end):
+                    j = H - 1 - i
+                    segmentation[i, :] = chunk_top[i]
+                    if j != i:
+                        segmentation[j, :] = chunk_bot[j]
+
+                # Report progress in ORDER (top then bottom) for the UI
+                if progress_callback:
+                    for i in range(chunk_start, chunk_end):
+                        progress_callback(i, H, chunk_top[i].tolist())
+                    for j_idx in sorted(chunk_bot.keys()):  # report bottom rows in order
+                        progress_callback(j_idx, H, chunk_bot[j_idx].tolist())
+    else:
+        # ─── SINGLE-STREAM CPU FALLBACK ───────────────────────────────
+        with torch.no_grad():
+            for i in range(H):
+                row_result = _infer_row(i)
+                segmentation[i, :] = row_result
+                if progress_callback:
+                    progress_callback(i + 1, H, row_result.tolist())
+
     return segmentation
 
 def calculate_area(segmented_img, pixel_width=3.3, pixel_height=3.3):
@@ -305,20 +446,23 @@ def upload_hyperspectral():
                             input_channels = 34
                             n_classes = 2
                             patch_size = 3
-                            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-                            model = HamidaEtAl(input_channels, n_classes, patch_size).to(device)
 
-                            model_path = os.environ.get('OIL_MODEL_PATH', MODEL_PATH)
-                            if not os.path.exists(model_path):
-                                task['error'] = f'Model file not found at {model_path}.'
-                                task['status'] = 'error'
-                                task['q'].put(None)
-                                return
+                            # ✅ Singleton model
+                            t0 = time.time()
+                            model, device = get_model(input_channels, n_classes, patch_size)
+                            print(f"[Timer] Model Setup: {time.time()-t0:.2f}s")
 
-                            state_dict = torch.load(model_path, map_location=device)
-                            model.load_state_dict(state_dict)
+                            # ✅ Auto-tune batch size
+                            if 'optimal_batch' not in _model_cache:
+                                _model_cache['optimal_batch'] = get_optimal_batch_size(
+                                    model, patch_size, input_channels, device
+                                )
+                            tuned_batch_size = _model_cache['optimal_batch']
 
+                            t0 = time.time()
                             mat_contents = scipy.io.loadmat(file_path)
+                            print(f"[Timer] .mat Load: {time.time()-t0:.2f}s")
+                            
                             if 'img' not in mat_contents:
                                 task['error'] = "Variable 'img' not found in the .mat file."
                                 task['status'] = 'error'
@@ -331,29 +475,48 @@ def upload_hyperspectral():
                             task['width'] = W
                             task['height'] = H
 
-                            data_reshaped = full_image.reshape(-1, C)
-                            pca = PCA(n_components=input_channels)
-                            data_pca = pca.fit_transform(data_reshaped)
-                            full_image_reduced = data_pca.reshape(H, W, input_channels).transpose(2, 0, 1)
+                            # ✅ NEW: GPU PCA (lightning fast)
+                            t0 = time.time()
+                            print(f"[PCA] 🔄 Starting GPU PCA for {filename}...")
+                            
+                            # Memory optimization: cast to float32 on CPU, then send to GPU
+                            data_reshaped = torch.from_numpy(
+                                full_image.reshape(-1, C).astype(np.float32)
+                            ).to(device, non_blocking=True)
 
-                            def on_progress(current, total, row_data=None):
-                                task['progress'] = current
+                            with torch.no_grad():
+                                data_pca = gpu_pca(data_reshaped, n_components=input_channels)
+                            
+                            full_image_reduced = (
+                                data_pca
+                                .reshape(H, W, input_channels)
+                                .permute(2, 0, 1)
+                                .contiguous()
+                            )
+                            print(f"[Timer] GPU PCA: {time.time()-t0:.2f}s")
+
+                            # Track rows completed
+                            rows_done = {'count': 0}
+                            def on_progress(current_idx, total, row_data=None):
+                                rows_done['count'] += 1
+                                task['progress'] = rows_done['count']
                                 task['total'] = total
                                 if row_data is not None:
                                     task['latest_row'] = row_data
                                 if 'pbar' in task:
                                     task['pbar'].update(1)
 
-                            print(f"\n🚀 Starting Hyperspectral Processing for {filename}")
-                            task['pbar'] = tqdm(total=H, desc="⏳ Segmenting Image (Batched)", unit="rows", leave=True)
-
+                            print(f"\n🚀 Starting Inference for {filename}")
+                            task['pbar'] = tqdm(total=H, desc="⏳ Segmenting", unit="rows", leave=True)
+                            
+                            t_inf = time.time()
                             segmentation_result = segment_full_image(
                                 model, full_image_reduced, patch_size, device,
-                                progress_callback=on_progress
+                                progress_callback=on_progress,
+                                batch_size=tuned_batch_size
                             )
-                            
                             task['pbar'].close()
-                            print("✅ Segmentation complete. Calculating stats and saving outputs...")
+                            print(f"[Timer] Total Inference: {time.time()-t_inf:.2f}s")
 
                             total_area = calculate_area(segmentation_result)
 
@@ -389,16 +552,25 @@ def upload_hyperspectral():
                             plt.figure(figsize=(10, 8))
                             plt.imshow(rgb_image_norm, cmap='gray')
                             plt.axis('off')
-                            plt.savefig(hist_input_path, bbox_inches='tight', pad_inches=0)
+                            plt.title('Original View', color='white', pad=20)
+                            plt.savefig(hist_input_path, bbox_inches='tight', pad_inches=0, facecolor='black')
                             plt.close()
 
                             # Save output (the overlay)
                             plt.figure(figsize=(10, 8))
                             plt.imshow(rgb_image_norm, cmap='gray')
-                            plt.imshow(segmentation_result, cmap='gray', alpha=0.4)
+                            
+                            # Only plot non-zero pixels with a bright color (Spring/Cyan)
+                            # This makes the detection visible even if few pixels are found
+                            masked_result = np.ma.masked_where(segmentation_result == 0, segmentation_result)
+                            plt.imshow(masked_result, cmap='spring', alpha=0.9) 
+                            
                             plt.axis('off')
-                            plt.savefig(hist_output_path, bbox_inches='tight', pad_inches=0)
+                            plt.title(f'Detected Oil (Pixels: {np.count_nonzero(segmentation_result)})', color='cyan', pad=20)
+                            plt.savefig(hist_output_path, bbox_inches='tight', pad_inches=0, facecolor='black')
                             plt.close()
+                            
+                            print(f"[Detection] ✅ Found {np.count_nonzero(segmentation_result)} oil pixels in {filename}")
 
                             # Save to DB using the helper, passing explicit username
                             save_detection('Hyperspectral', filename, total_area, hist_input_name, hist_output_name, username)
@@ -441,7 +613,8 @@ def progress(task_id):
             return
 
         while task['status'] == 'processing':
-            pct = int((task['progress'] / max(task['total'], 1)) * 100)
+            # Use min(pct, 100) and ensure it doesn't go backwards
+            pct = min(int((task['progress'] / max(task['total'], 1)) * 100), 100)
             elapsed = time.time() - task.get('start_time', time.time())
             
             remaining = 0
