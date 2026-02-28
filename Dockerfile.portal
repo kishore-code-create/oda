@@ -29,8 +29,8 @@ USER appuser
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:${PORT:-5001}/health || exit 1
 
-# Expose port (Render ignores this but keeps it for docs)
-EXPOSE 5001
+# Expose port
+EXPOSE 10001
 
-# Run with Gunicorn
-CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-5001} --workers 4 --worker-class sync --timeout 120 --access-logfile - --error-logfile - portal_app:app"]
+# Run with Streamlit
+CMD ["streamlit", "run", "portal_st.py", "--server.port", "10001", "--server.address", "0.0.0.0"]
