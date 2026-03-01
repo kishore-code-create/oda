@@ -115,7 +115,9 @@ class HamidaEtAl(nn.Module):
 
 @st.cache_resource
 def load_detection_model():
-    model_path = os.path.join(os.path.dirname(__file__), 'file.pth')
+    # Use absolute path relative to this file's directory
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    model_path = os.path.join(current_dir, 'file.pth')
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if not os.path.exists(model_path):
         st.error(f"Model file not found at {model_path}")
