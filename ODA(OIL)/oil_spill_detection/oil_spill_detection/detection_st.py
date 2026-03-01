@@ -18,13 +18,13 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Page Config
-st.set_page_config(
-    page_title="ODA - Oil Spill Detection",
-    page_icon="🌊",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# Page Config - (Handled by main_st.py)
+# st.set_page_config(
+#     page_title="ODA - Oil Spill Detection",
+#     page_icon="🌊",
+#     layout="wide",
+#     initial_sidebar_state="expanded"
+# )
 
 # Custom CSS for Premium Look
 st.markdown("""

@@ -5,12 +5,12 @@ import os
 import pandas as pd
 import datetime
 
-# Page Config
-st.set_page_config(
-    page_title="ODA - Report Portal",
-    page_icon="📋",
-    layout="wide"
-)
+# Page Config - (Handled by main_st.py)
+# st.set_page_config(
+#     page_title="ODA - Report Portal",
+#     page_icon="📋",
+#     layout="wide"
+# )
 
 # ── Database config ───────────────────────────────────────────────────────────
 DATABASE_URL = os.environ.get('DATABASE_URL')
