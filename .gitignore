@@ -5,7 +5,6 @@
 **/static/uploads/*.png
 **/static/outputs/*.png
 **/static/history/*.png
-**/file.pth
 **/__pycache__/
 .venv/
 broken.venv/
