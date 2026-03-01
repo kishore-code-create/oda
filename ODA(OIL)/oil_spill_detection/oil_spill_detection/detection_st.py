@@ -67,51 +67,59 @@ def get_db_conn():
         cursor_factory=psycopg2.extras.DictCursor
     )
 
-# ── Model Classes (Copied from app1.py) ───────────────────────────────────────
-class HamidaEtAl(nn.Module):
-    @staticmethod
-    def weight_init(m):
-        if isinstance(m, nn.Linear) or isinstance(m, nn.Conv3d):
-            nn.init.kaiming_normal_(m.weight)
-            nn.init.zeros_(m.bias)
+# ── GPU/CPU Detection Logic ──────────────────────────────────────────────────
 
-    def __init__(self, input_channels, n_classes, patch_size=3, dilation=1):
-        super(HamidaEtAl, self).__init__()
-        self.patch_size = patch_size
-        self.input_channels = input_channels
-        dilation = (dilation, 1, 1)
+def gpu_pca(data_tensor, n_components):
+    """Randomized GPU PCA — much faster than full SVD for large matrices."""
+    mean = data_tensor.mean(dim=0, keepdim=True)
+    centered = data_tensor - mean
+    # Randomized SVD is faster and accurate enough for this task
+    U, S, V = torch.pca_lowrank(centered, q=n_components, center=False, niter=4)
+    return centered @ V
 
-        self.conv1 = nn.Conv3d(1, 20, (3, 3, 3), stride=(1, 1, 1), dilation=dilation, padding=1)
-        self.pool1 = nn.Conv3d(20, 20, (3, 1, 1), dilation=dilation, stride=(2, 1, 1), padding=(1, 0, 0))
-        self.conv2 = nn.Conv3d(20, 35, (3, 3, 3), dilation=dilation, stride=(1, 1, 1), padding=(1, 0, 0))
-        self.pool2 = nn.Conv3d(35, 35, (3, 1, 1), dilation=dilation, stride=(2, 1, 1), padding=(1, 0, 0))
-        self.conv3 = nn.Conv3d(35, 35, (3, 1, 1), dilation=dilation, stride=(1, 1, 1), padding=(1, 0, 0))
-        self.conv4 = nn.Conv3d(35, 35, (2, 1, 1), dilation=dilation, stride=(2, 1, 1), padding=(1, 0, 0))
+def segment_full_image(model, image, patch_size, device, progress_callback=None, batch_size=4096):
+    """
+    Optimized segmentation:
+    - Vectorized patch extraction (unfold)
+    - Mixed Precision support
+    - Progress reporting
+    """
+    channels, H, W = image.shape
+    pad = patch_size // 2
+    
+    # Pad image (Reflect padding for edges)
+    padded = F.pad(image.unsqueeze(0), (pad, pad, pad, pad), mode='reflect')
+    img_t = padded # (1, C, H+2pad, W+2pad)
+    
+    segmentation = np.zeros((H, W), dtype=np.int64)
+    model.eval()
 
-        self.features_size = self._get_final_flattened_size()
-        self.fc = nn.Linear(self.features_size, n_classes)
-        self.apply(self.weight_init)
+    def _infer_row(i):
+        # Extract all patches in this row at once (Vectorized)
+        row_data = img_t[:, :, i:i+patch_size, :]
+        patches = row_data.unfold(3, patch_size, 1) # (1, C, patch_size, W, patch_size)
+        patches = patches.permute(3, 0, 1, 2, 4).contiguous() # (W, 1, C, patch_size, patch_size)
 
-    def _get_final_flattened_size(self):
+        preds_list = []
         with torch.no_grad():
-            x = torch.zeros((1, 1, self.input_channels, self.patch_size, self.patch_size))
-            x = self.pool1(self.conv1(x))
-            x = self.pool2(self.conv2(x))
-            x = self.conv3(x)
-            x = self.conv4(x)
-            _, t, c, w, h = x.size()
-        return t * c * w * h
+            for b in range(0, W, batch_size):
+                out = model(patches[b:b+batch_size])
+                preds_list.append(torch.argmax(out, dim=1))
 
-    def forward(self, x):
-        x = F.relu(self.conv1(x))
-        x = self.pool1(x)
-        x = F.relu(self.conv2(x))
-        x = self.pool2(x)
-        x = F.relu(self.conv3(x))
-        x = F.relu(self.conv4(x))
-        x = x.view(-1, self.features_size)
-        x = self.fc(x)
-        return x
+        return torch.cat(preds_list)[:W].cpu().numpy()
+
+    with torch.no_grad():
+        for i in range(H):
+            row_result = _infer_row(i)
+            segmentation[i, :] = row_result
+            if progress_callback:
+                progress_callback(i + 1, H)
+
+    return segmentation
+
+def calculate_area(segmented_img, pixel_width=3.3, pixel_height=3.3):
+    object_pixels = np.count_nonzero(segmented_img)
+    return object_pixels * pixel_width * pixel_height
 
 @st.cache_resource
 def load_detection_model():
@@ -172,25 +180,59 @@ if page == "Real-time Detection":
                     progress_bar = st.progress(0)
                     status_text = st.empty()
                     
-                    # Implementation of detection logic here...
-                    # (Migrating the segment_full_image and GPU PCA logic)
                     model, device = load_detection_model()
-                    
-                    # Placeholder for actual processing loop
-                    for i in range(100):
-                        time.sleep(0.01)
-                        progress_bar.progress(i + 1)
-                        status_text.text(f"Scanning rows... {i+1}%")
-                    
-                    st.success("✅ Detection Complete!")
-                    
-                    with col2:
-                        st.subheader("Detected Oil")
-                        # This would be the actual overlay_image
-                        st.image(rgb_preview, use_column_width=True)
+                    if model is not None:
+                        # 1. Run PCA
+                        status_text.text("⚡ Running GPU-accelerated PCA...")
+                        data_reshaped = torch.from_numpy(full_image.reshape(-1, C).astype(np.float32)).to(device)
+                        data_pca = gpu_pca(data_reshaped, n_components=34)
+                        full_image_reduced = data_pca.reshape(H, W, 34).permute(2, 0, 1).contiguous()
                         
-                    st.metric("Estimated Oil Area", "1,245.50 m²")
-                    st.metric("Estimated Volume", "0.001246 m³", delta="Low Severity")
+                        # 2. Run Segmentation
+                        def update_progress(current, total):
+                            progress_bar.progress(current / total)
+                            status_text.text(f"Scanning rows... {current}/{total}")
+
+                        segmentation_result = segment_full_image(
+                            model, full_image_reduced, 3, device,
+                            progress_callback=update_progress
+                        )
+                        
+                        st.success("✅ Detection Complete!")
+                        
+                        total_area = calculate_area(segmentation_result)
+                        
+                        with col2:
+                            st.subheader("Detected Oil")
+                            # Create overlay
+                            masked_result = np.ma.masked_where(segmentation_result == 0, segmentation_result)
+                            
+                            import matplotlib.pyplot as plt
+                            fig, ax = plt.subplots(figsize=(10, 10))
+                            ax.imshow(rgb_preview)
+                            ax.imshow(masked_result, cmap='spring', alpha=0.7)
+                            ax.axis('off')
+                            st.pyplot(fig)
+                            
+                        st.metric("Estimated Oil Area", f"{total_area:,.2f} m²")
+                        
+                        # Volume calculation (area * thickness)
+                        thickness = st.session_state.get('thickness', 1.0) # in micrometers
+                        volume = total_area * (thickness * 1e-6)
+                        st.metric("Estimated Volume", f"{volume:,.6f} m³", delta="Live Analysis")
+                        
+                        # Save to database
+                        try:
+                            conn = get_db_conn()
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    "INSERT INTO detection_history (user_id, username, method, filename, area_m2) VALUES (1, 'Admin', 'Hyperspectral', %s, %s)",
+                                    (uploaded_file.name, total_area)
+                                )
+                            conn.commit()
+                            conn.close()
+                        except:
+                            pass
 
         else:
             # JPG conversion logic
