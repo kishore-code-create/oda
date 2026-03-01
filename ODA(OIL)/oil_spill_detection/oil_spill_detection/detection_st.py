@@ -52,19 +52,18 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ── Database config ───────────────────────────────────────────────────────────
-DB_HOST = os.environ.get('DB_HOST', 'localhost')
-DB_USER = os.environ.get('DB_USER', 'postgres')
-DB_PASSWORD = os.environ.get('DB_PASSWORD', 'postgres')
-DB_NAME = os.environ.get('DB_NAME', 'oil_spill_db')
-DB_PORT = int(os.environ.get('DB_PORT', 5432))
+DATABASE_URL = os.environ.get('DATABASE_URL')
 
 def get_db_conn():
+    if DATABASE_URL:
+        return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.DictCursor)
+    
     return psycopg2.connect(
-        host=DB_HOST,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        database=DB_NAME,
-        port=DB_PORT,
+        host=os.environ.get('DB_HOST', 'localhost'),
+        user=os.environ.get('DB_USER', 'postgres'),
+        password=os.environ.get('DB_PASSWORD', 'postgres'),
+        database=os.environ.get('DB_NAME', 'oil_spill_db'),
+        port=int(os.environ.get('DB_PORT', 5432)),
         cursor_factory=psycopg2.extras.DictCursor
     )
 

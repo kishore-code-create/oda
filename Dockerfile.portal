@@ -25,12 +25,8 @@ COPY OilSpillPortal /app
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-10001}/ || exit 1
+# Expose port (7860 is HF default)
+EXPOSE 7860
 
-# Expose port
-EXPOSE 10001
-
-# Run with Streamlit
-CMD ["streamlit", "run", "portal_st.py", "--server.port", "10001", "--server.address", "0.0.0.0"]
+# Run with Gunicorn for Flask app
+CMD ["gunicorn", "--bind", "0.0.0.0:7860", "portal_app:app"]
