@@ -23,14 +23,14 @@ services:
       retries: 10
     restart: unless-stopped
 
-  # Oil Spill Detection API
+  # Oil Spill Detection UI (Streamlit)
   oil_spill_app:
     build:
       context: .
       dockerfile: Dockerfile.oil_spill
     container_name: oil_spill_detection
     environment:
-      FLASK_ENV: ${FLASK_ENV:-production}
+      FLASK_ENV: ${FLASK_ENV:-production}  # still used for config loading if needed
       FLASK_SECRET_KEY: ${FLASK_SECRET_KEY}
       DB_HOST: mysql
       DB_PORT: 3306
@@ -41,8 +41,9 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_S3_BUCKET: ${AWS_S3_BUCKET}
       ROBOFLOW_API_KEY: ${ROBOFLOW_API_KEY}
+      STREAMLIT_PORT: 10000
     ports:
-      - "5000:5000"
+      - "10000:10000"
     depends_on:
       mysql:
         condition: service_healthy
@@ -52,14 +53,14 @@ services:
     networks:
       - oil_spill_network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:10000/" ]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
     restart: unless-stopped
 
-  # Oil Spill Portal App
+  # Oil Spill Portal UI (Streamlit)
   portal_app:
     build:
       context: .
@@ -76,8 +77,9 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
       GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI}
+      STREAMLIT_PORT: 10001
     ports:
-      - "5001:5001"
+      - "10001:10001"
     depends_on:
       mysql:
         condition: service_healthy
@@ -87,7 +89,7 @@ services:
     networks:
       - oil_spill_network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:10001/" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -95,28 +97,7 @@ services:
     restart: unless-stopped
 
   # Real Time Detection App
-  realtime_app:
-    build:
-      context: .
-      dockerfile: Dockerfile.realtime
-    container_name: oil_spill_realtime
-    environment:
-      FLASK_ENV: ${FLASK_ENV:-production}
-      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY}
-    ports:
-      - "5002:5002"
-    volumes:
-      - ./RealTimeDetection/static:/app/static
-      - ./RealTimeDetection:/app
-    networks:
-      - oil_spill_network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5002/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-    restart: unless-stopped
+  # (merged into the main Streamlit detection UI; no longer a separate container)
 
   # Nginx Reverse Proxy
   nginx:
