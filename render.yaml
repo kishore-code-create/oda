@@ -1,0 +1,29 @@
+services:
+  # The Portal Web App
+  - type: web
+    name: oil-spill-portal
+    env: python
+    buildCommand: pip install -r OilSpillPortal/requirements.txt
+    startCommand: gunicorn OilSpillPortal.portal_app:app
+    envVars:
+      - key: DATABASE_URL
+        sync: false # Set in Render Dashboard
+      - key: FLASK_SECRET_KEY
+        generateValue: true
+      - key: PORTAL_URL
+        fromService:
+          name: oil-spill-portal
+          type: web
+          property: host
+
+  # The Detection App (App1)
+  - type: web
+    name: oil-spill-detection
+    env: python
+    buildCommand: pip install -r ODA(OIL)/oil_spill_detection/oil_spill_detection/requirements.txt
+    startCommand: gunicorn ODA(OIL).oil_spill_detection.oil_spill_detection.app1:app
+    envVars:
+      - key: DATABASE_URL
+        sync: false # Set in Render Dashboard
+      - key: FLASK_SECRET_KEY
+        generateValue: true
