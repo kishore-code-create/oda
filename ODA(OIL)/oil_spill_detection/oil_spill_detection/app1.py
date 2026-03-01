@@ -33,6 +33,7 @@ app.secret_key = os.environ.get('FLASK_SECRET', 'your_secret_key')
 tasks = {}
 
 # Database configuration (use environment variables when available)
+DATABASE_URL = os.environ.get('DATABASE_URL')
 DB_HOST = os.environ.get('DB_HOST', 'localhost')
 DB_USER = os.environ.get('DB_USER', 'postgres')
 DB_PASSWORD = os.environ.get('DB_PASSWORD', 'postgres')
@@ -127,14 +128,18 @@ def get_optimal_batch_size(model, patch_size, input_channels, device, start=8192
 def get_db():
     """Get a database connection for the current request."""
     if 'db' not in g:
-        g.db = psycopg2.connect(
-            host=DB_HOST,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            database=DB_NAME,
-            port=DB_PORT,
-            cursor_factory=psycopg2.extras.DictCursor
-        )
+        if DATABASE_URL:
+            # Prefer DATABASE_URL (standard for cloud providers like Neon/Heroku/Render)
+            g.db = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.DictCursor)
+        else:
+            g.db = psycopg2.connect(
+                host=DB_HOST,
+                user=DB_USER,
+                password=DB_PASSWORD,
+                database=DB_NAME,
+                port=DB_PORT,
+                cursor_factory=psycopg2.extras.DictCursor
+            )
     return g.db
 
 @app.teardown_appcontext
@@ -144,7 +149,7 @@ def close_db(exception):
     if db is not None:
         db.close()
 
-def save_detection(method, filename, area_m2, input_image=None, output_image=None, username=None):
+def save_detection(method, filename, area_m2, input_image=None, output_image=None, username=None, estimated_volume=None):
     """Save a detection result to detection_history for the current user."""
     # Use provided username, or fallback to session
     effective_username = username or session.get('username')
@@ -160,8 +165,8 @@ def save_detection(method, filename, area_m2, input_image=None, output_image=Non
             user = cur.fetchone()
             if user:
                 cur.execute(
-                    "INSERT INTO detection_history (user_id, username, method, filename, area_m2, input_image, output_image) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                    (user['id'], effective_username, method, filename, area_m2, input_image, output_image)
+                    "INSERT INTO detection_history (user_id, username, method, filename, area_m2, input_image, output_image, estimated_volume) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                    (user['id'], effective_username, method, filename, area_m2, input_image, output_image, estimated_volume)
                 )
                 conn.commit()
     except Exception as e:
@@ -735,6 +740,9 @@ def calculate_volume():
     # Include thickness in the display
     thickness_info = f"<small>(Based on {thickness_micrometers} μm thickness)</small>"
     volume_display = f"{volume_display} {thickness_info}"
+    
+    # Save the updated detection with volume to history
+    save_detection(method, history_image.replace('sar_output_', '').replace('hyperspectral_output_', '').replace('.png', ''), area, segmented_image, overlay_image, session.get('username'), volume_display)
     
     return render_template('results.html', 
                           volume_display=volume_display, 

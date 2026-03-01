@@ -139,8 +139,9 @@ resource "aws_security_group" "ec2" {
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port       = 5000
-    to_port         = 5002
+    # Streamlit applications now listen on 10000 (detection) and 10001 (portal).
+    from_port       = 10000
+    to_port         = 10001
     protocol        = "tcp"
     security_groups = [aws_security_group.alb.id]
   }

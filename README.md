@@ -19,7 +19,7 @@ This package includes everything needed to deploy the Oil Spill Detection applic
 - ✅ AWS Secrets Manager integration
 
 ### Containerization (Docker)
-- ✅ Dockerfiles for all 3 applications
+- ✅ Dockerfiles for both Streamlit applications (detection + portal)
 - ✅ docker-compose.yml for local development
 - ✅ Nginx reverse proxy configuration
 - ✅ SSL/TLS support
@@ -61,9 +61,9 @@ chmod +x scripts/deploy_docker.sh
 ./scripts/deploy_docker.sh
 
 # 3. Access applications
-# - Oil Spill API: http://localhost:5000
-# - Portal: http://localhost:5001
-# - Real Time Detection: http://localhost:5002
+# - Oil Spill Detection UI: http://localhost:10000
+# - Portal UI: http://localhost:10001
+#   (real-time detection now integrated into the main interface)
 # - Nginx: https://localhost:443
 ```
 

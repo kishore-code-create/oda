@@ -37,11 +37,14 @@ SCOPES = [
 ]
 
 # ── DB config ──────────────────────────────────────────────────────────────────
+DATABASE_URL = os.environ.get('DATABASE_URL')
 DB_HOST     = os.environ.get('DB_HOST', 'localhost')
 DB_USER     = os.environ.get('DB_USER', 'postgres')
 DB_PASSWORD = os.environ.get('DB_PASSWORD', 'postgres')
 DB_NAME     = os.environ.get('DB_NAME', 'oil_spill_portal_db')
-DB_PORT     = int(os.environ.get('DB_PORT', 5432))
+# ── URLs config ───────────────────────────────────────────────────────────────
+PORTAL_URL = os.environ.get('PORTAL_URL', 'http://127.0.0.1:5001')
+APP_URL    = os.environ.get('APP_URL', 'http://127.0.0.1:5000')
 
 UPLOAD_FOLDER  = os.path.join(os.path.dirname(__file__), 'static', 'uploads')
 ALLOWED_EXT    = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
@@ -78,11 +81,17 @@ ROLE_VISIBILITY = {
 # ── DB helpers ─────────────────────────────────────────────────────────────────
 def get_db():
     if 'db' not in g:
-        g.db = psycopg2.connect(
-            host=DB_HOST, user=DB_USER, password=DB_PASSWORD,
-            database=DB_NAME, port=DB_PORT,
-            cursor_factory=psycopg2.extras.DictCursor
-        )
+        if DATABASE_URL:
+            g.db = psycopg2.connect(
+                DATABASE_URL,
+                cursor_factory=psycopg2.extras.DictCursor
+            )
+        else:
+            g.db = psycopg2.connect(
+                host=DB_HOST, user=DB_USER, password=DB_PASSWORD,
+                database=DB_NAME, port=DB_PORT,
+                cursor_factory=psycopg2.extras.DictCursor
+            )
         g.db.autocommit = False
     return g.db
 
@@ -343,7 +352,7 @@ def notify_user_report(report_id):
                     </div>
                     
                     <div style="text-align: center; margin: 35px 0;">
-                        <a href="http://127.0.0.1:5001/report/{report_id}" 
+                        <a href="{PORTAL_URL}/report/{report_id}" 
                            style="background: #00aaff; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">
                            ACCESS FULL REPORT
                         </a>
